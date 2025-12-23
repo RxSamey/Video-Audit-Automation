@@ -1,0 +1,7 @@
+.env
+__pycache__/
+input_videos/
+outputs/
+*.mp4
+*.csv
+*.json

@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import numpy as np
 import re
+import pandas as pd
+
 
 # ---------------------------
 # GLOBAL API COST TRACKING
@@ -364,12 +366,15 @@ def derive_fields(text_lines):
             data["developer_options"] = {"value": False, "visible": True}
 
          # ---------------- BUILD VERSION ----------------
-    build_match = re.search(r"\b\d{2}\.\d\b", combined_text)
+    # ---------------- BUILD VERSION (FLEXIBLE: 2–20 SEGMENTS) ----------------
+    build_match = re.search(r"\b\d+(?:\.\d+){1,19}\b", combined_text)
     if build_match:
         data["build_version"] = {
             "value": build_match.group(),
             "visible": True
         }
+
+        
 
     # --------------------------------------------------
     # SCREEN RECORDING
@@ -498,6 +503,25 @@ def save_csv(data, risk, flags):
         writer.writeheader()
         writer.writerow(flat)
 
+def save_csv_multiple(results):
+    rows = []
+
+    for data in results:
+        flat = {}
+
+        for key, obj in data.items():
+            if isinstance(obj, dict):
+                flat[f"{key}_value"] = obj.get("value")
+
+        flat["risk_level"] = data.get("_risk_level")
+        flat["risk_flags"] = data.get("_risk_flags")
+
+        rows.append(flat)
+
+    df = pd.DataFrame(rows)
+    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8")
+
+
 
 
 def analyze_frame_semantic(encoded, client):
@@ -558,59 +582,56 @@ def select_semantic_frame(frames):
 # ---------------------------
 # MAIN
 # ---------------------------
-def main(api_key):
+def main(api_key, video_paths):
     client = get_client(api_key)
 
-    # 1. Extract frames
-    frames = extract_frames(VIDEO_PATH)
+    all_results = []  # store results for all videos
 
-    all_text = []
-    semantic_data = {}
+    for video_path in video_paths:
+        print(f"\nProcessing video: {video_path}")
 
-    # 2. Process frames
-    for i, frame in enumerate(frames):
-        encoded = encode_frame(frame)
+        # 1. Extract frames for THIS video
+        frames = extract_frames(video_path)
 
-        # ✅ GPT Vision ONCE for semantic fields
-        if i == len(frames) // 2:
-            semantic_frame = select_semantic_frame(frames)
-            if semantic_frame is not None:
-                semantic_data = analyze_frame_semantic(
-                    encode_frame(semantic_frame), client
-                 )
+        all_text = []
 
+        # 2. OCR on all frames (fast + deterministic)
+        for frame in frames:
+            try:
+                ocr_text = pytesseract.image_to_string(frame)
+                all_text.extend(
+                    [l.strip() for l in ocr_text.splitlines() if l.strip()]
+                )
+            except:
+                pass
 
+        # 3. Derive structured audit fields
+        final = derive_fields(all_text)
 
-        # ✅ OCR for ALL frames
-        try:
-            ocr_text = pytesseract.image_to_string(frame)
-            all_text.extend(
-                [l.strip() for l in ocr_text.splitlines() if l.strip()]
-            )
-        except:
-            pass
+        # 4. Add video name for traceability
+        final["video_name"] = {
+            "value": os.path.basename(video_path),
+            "visible": True
+        }
 
-    # 3. Derive structured audit fields from OCR text
-    final = derive_fields(all_text)
+        # 5. Calculate risk
+        risk, flags = calculate_risk(final)
 
-    # 4. Overlay GPT semantic data (authoritative)
-    for key, value in semantic_data.items():
-        if value:
-            final[key] = {"value": value, "visible": True}
+        # 6. Attach risk to record
+        final["_risk_level"] = risk
+        final["_risk_flags"] = "; ".join(flags)
 
-    # 5. Calculate risk
-    risk, flags = calculate_risk(final)
+        # Debug print (VERY useful)
+        print("FINAL DATA:")
+        print(json.dumps(final, indent=2))
 
-    # 6. Save outputs
-    with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
-        json.dump(final, f, indent=4)
+        all_results.append(final)
 
-    save_csv(final, risk, flags)
+    # 7. Save combined outputs
+    save_csv_multiple(all_results)
 
-    print("DONE. Risk level:", risk)
+    print("\nALL VIDEOS PROCESSED SUCCESSFULLY")
 
-    print("FINAL DATA BEFORE SAVE:")
-    print(json.dumps(final, indent=2))
 
 
     # ------------------------------------------------
@@ -621,8 +642,8 @@ def main(api_key):
 # ---------------------------
 # ENTRY POINTS
 # ---------------------------
-def run_agent(api_key):
-    main(api_key)
+def run_agent(api_key, video_paths):
+    main(api_key, video_paths)
 
 
 if __name__ == "__main__":
